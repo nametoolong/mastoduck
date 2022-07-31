@@ -1,0 +1,11 @@
+{
+	"dependencies": {
+		"ddb": "~>0.3.0",
+		"dotenv": "~>0.1.0",
+		"vibe-d": "~>0.9.0"
+	},
+	"description": "A vibe.d replcement of Mastodon streaming process.",
+	"license": "AGPL-3.0",
+	"name": "mastoduck",
+	"versions": ["Have_vibe_d_core", "VibeNoSSL"]
+}

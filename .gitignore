@@ -1,0 +1,15 @@
+.dub
+docs.json
+__dummy.html
+docs/
+/mastoduck
+mastoduck.so
+mastoduck.dylib
+mastoduck.dll
+mastoduck.a
+mastoduck.lib
+mastoduck-test-*
+*.exe
+*.o
+*.obj
+*.lst
