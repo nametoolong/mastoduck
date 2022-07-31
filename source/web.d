@@ -251,13 +251,9 @@ void handleHTTPConnection(HTTPServerRequest req, HTTPServerResponse res)
 	res.bodyWriter.write(":)\n");
 	res.bodyWriter.flush();
 
-	Timer heartbeatTimer = setTimer(15.seconds, () nothrow {
-		try
-		{
-			connState.sendHeartbeat();
-		}
-		catch (Exception) {}
-	}, true);
+	enum httpHeartbeatInterval = 15.seconds;
+	Timer heartbeatTimer = setTimer(
+		httpHeartbeatInterval, &connState.sendHeartbeat, true);
 
 	scope (exit)
 	{
@@ -275,7 +271,8 @@ void handleHTTPConnection(HTTPServerRequest req, HTTPServerResponse res)
 			{
 			case MessageType.event:
 				res.bodyWriter.write(
-					format("event: %r\ndata: %r\n\n", msg.event, msg.payload));
+					format("event: %r\ndata: %r\n\n",
+						msg.event, msg.payload));
 				res.bodyWriter.flush();
 				checkDeliverTime(msg);
 				break;

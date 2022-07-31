@@ -34,9 +34,10 @@ struct PushMessage
 	long queuedAt;
 }
 
+@safe:
+
 struct SubscriptionManager
 {
-@trusted:
 	static Nullable!ulong nextConnId()
 	{
 		foreach (_; 0..3)
@@ -94,14 +95,14 @@ struct SubscriptionManager
 		}
 	}
 
-	static void listenRedis()
+	static void listenRedis() @trusted
 	{
 		RedisConnector.getInstance().listen(toDelegate(&redisCallback));
-		setTimer(dur!"seconds"(heartbeatInterval), toDelegate(&tellSubscribed), true);
+		setTimer(dur!"seconds"(channelHeartbeatInterval), toDelegate(&tellSubscribed), true);
 	}
 
 private:
-	enum long heartbeatInterval = 6 * 60;
+	enum long channelHeartbeatInterval = 6 * 60;
 
 	alias ConnectionIdSet = RedBlackTree!ulong;
 
@@ -152,7 +153,7 @@ private:
 			{
 				RedisConnector.getInstance().setEX(
 					format("subscribed:%r", name),
-					"1", 3 * heartbeatInterval);
+					"1", 3 * channelHeartbeatInterval);
 			}
 		}
 		catch (Exception e)
@@ -164,7 +165,6 @@ private:
 
 class ConnectionState
 {
-@safe:
 	static ConnectionState create(scope const(HTTPServerRequest) req) @trusted
 	{
 		auto maybeConnId = SubscriptionManager.nextConnId();

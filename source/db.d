@@ -3,6 +3,8 @@ module mastoduck.db;
 import ddb.postgres;
 import vibe.vibe;
 
+@safe:
+
 class NotInitializedError : Exception
 {
 	this(string msg)
@@ -56,8 +58,7 @@ protected:
 	this(immutable(string[string]) settings)
 	{
 		dbSettings = settings;
-		connectionPool = new ConnectionPool!PGConnection(&createConnection);
-		connectionPool.maxConcurrency = 16;
+		connectionPool = new ConnectionPool!PGConnection(&createConnection, 16);
 	}
 
 	override void doCleanup()
