@@ -3,7 +3,7 @@
 	"versions": {
 		"botan": "1.12.19",
 		"botan-math": "1.0.3",
-		"ddb": "0.3.0",
+		"ddb": "~master",
 		"diet-ng": "1.8.0",
 		"dotenv": "0.1.1",
 		"eventcore": "0.9.20",
