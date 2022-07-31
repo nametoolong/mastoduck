@@ -1,0 +1,3 @@
+[submodule "ddb"]
+	path = ddb
+	url = https://github.com/nametoolong/ddb
