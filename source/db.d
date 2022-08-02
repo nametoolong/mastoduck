@@ -105,6 +105,11 @@ public:
 		redisDatabase.setEX(key, seconds, value);
 	}
 
+	void del(string key)
+	{
+		redisDatabase.del(key);
+	}
+
 protected:
 	this(string host, ushort port, string password, long dbIndex)
 	{

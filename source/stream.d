@@ -159,6 +159,13 @@ struct SubscriptionManager
 		{
 			connStateByChannel.remove(channelName);
 			RedisConnector.getInstance().unsubscribe(channelName);
+			// Note: a race condition can happen with another task
+			// in setSubscribedFlag. At worst this causes a user to
+			// receive no streaming events, but fixing this
+			// requires either coarse-grained locking or less precise
+			// detection of online status from Ruby side.
+			// Leave this as is for this moment.
+			delSubscribedFlag(channelName);
 		}
 	}
 
@@ -236,6 +243,12 @@ private:
 		RedisConnector.getInstance().setEX(
 			format("subscribed:%r", channelName),
 			"1", 3 * channelHeartbeatInterval);
+	}
+
+	static void delSubscribedFlag(string channelName)
+	{
+		RedisConnector.getInstance().del(
+			format("subscribed:%r", channelName));
 	}
 }
 
