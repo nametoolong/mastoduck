@@ -260,7 +260,7 @@ bool isInScope(Types...)(AuthenticationInfo authInfo, Types requiredScopes)
 immutable(string[])
 channelsForUserStream(Range)
 	(AuthenticationInfo authInfo, Range accountId)
-in (authInfo)
+in (authInfo !is null)
 {
 	string[] channelIds;
 	channelIds.reserve(3);

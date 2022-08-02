@@ -3,20 +3,107 @@ module mastoduck.stream;
 import mastoduck.auth;
 import mastoduck.channel;
 import mastoduck.db;
+import mastoduck.filter;
+import mastoduck.util;
 
+import std.algorithm.iteration : map;
 import std.algorithm.mutation : remove, SwapStrategy;
-import std.algorithm.searching : canFind;
+import std.algorithm.searching : any, canFind;
 import std.array : array;
-import std.container.rbtree : RedBlackTree;
+import std.conv : to;
 import std.datetime : dur;
 import std.exception : enforce;
 import std.format : format;
 import std.typecons;
-import std.random;
 
 import ddb.postgres : PGCommand, PGType;
 import vibe.core.channel;
 import vibe.vibe;
+
+@safe:
+
+immutable struct AccountInfo
+{
+	long id;
+	string acct;
+
+	this() @disable;
+
+	static AccountInfo fromBSON(Bson bson)
+	{
+		Nullable!long id;
+		string acct;
+
+		foreach (key, value; bson.byKeyValue())
+		{
+			switch (key)
+			{
+			case "id":
+				id = to!long(value.get!string());
+				break;
+			case "acct":
+				acct = value.get!string();
+				break;
+			default:
+			}
+		}
+
+		enforce(!id.isNull, "Account.id must exist");
+		enforce(acct.length != 0, "Account name must not be empty");
+
+		AccountInfo obj = {
+			id: id.get(),
+			acct: acct
+		};
+
+		return obj;
+	}
+}
+
+struct StreamData
+{
+	string channelName;
+	string event;
+	Bson payload;
+	long queuedAt;
+
+	static StreamData fromBSON(string channelName, Bson bson)
+	{
+		string event;
+		Bson payload;
+		long queuedAt;
+
+		foreach (key, value; bson.byKeyValue())
+		{
+			switch (key)
+			{
+			case "event":
+				event = value.get!string();
+				break;
+			case "payload":
+				payload = value;
+				break;
+			case "queued_at":
+				queuedAt = value.tryReadInteger(0);
+				break;
+			default:
+			}
+		}
+
+		enforce(channelName.length != 0, "Channel name must not be empty");
+		enforce(event.length != 0, "Event must not be empty");
+		enforce(payload.type != Bson.Type.undefined, "Payload must be an object");
+
+		StreamData obj = {
+			channelName: channelName,
+			event: event,
+			payload: payload,
+			queuedAt: queuedAt
+		};
+
+		return obj;
+	}
+}
 
 enum MessageType
 {
@@ -25,72 +112,51 @@ enum MessageType
 	error
 }
 
-struct PushMessage
+struct StreamMessage
 {
 	MessageType type;
-	Nullable!StreamName streamName;
+	string errorMessage;
+	StreamData data;
+}
+
+const struct PushMessage
+{
+	MessageType type;
+	StreamName[] streamNames;
 	string event;
-	string payload;
+	Json payload;
 	long queuedAt;
 }
 
-@safe:
-
 struct SubscriptionManager
 {
-	static Nullable!ulong nextConnId()
-	{
-		foreach (_; 0..3)
-		{
-			ulong rand = rng.front;
-			rng.popFront();
-
-			if (!(rand in stateMap))
-			{
-				return Nullable!ulong(rand);
-			}
-		}
-
-		return Nullable!ulong.init;
-	}
-
-	static void addState(ConnectionState state)
-	{
-		enforce(!(state.connId in stateMap),
-			format("SubscriptionManager: adding a duplicate connId %d", state.connId));
-		stateMap[state.connId] = state;
-	}
-
-	static void removeState(ConnectionState state)
-	{
-		enforce(state.connId in stateMap, 
-			format("SubscriptionManager: removing an invalid connId %d", state.connId));
-		stateMap.remove(state.connId);
-	}
-
 	static void subscribe(ConnectionState state, string channelName)
+	in (state !is null && channelName.length != 0)
 	{
-		enforce(state.connId in stateMap, "Can't find connId in stateMap");
+		ConnectionState[] ids = connStateByChannel.require(channelName, []);
 
-		if (!(channelName in connIdByChannel))
+		if (ids.any!(o => o is state))
 		{
-			connIdByChannel[channelName] = new ConnectionIdSet();
+			return;
 		}
 
-		connIdByChannel[channelName].insert(state.connId);
+		connStateByChannel[channelName] ~= state;
 		RedisConnector.getInstance().subscribe(channelName);
 	}
 
 	static void unsubscribe(ConnectionState state, string channelName)
+	in (state !is null && channelName.length != 0)
 	{
-		enforce(state.connId in stateMap, "Can't find connId in stateMap");
-		enforce(channelName in connIdByChannel, "Invalid channel name to unsubscribe");
+		enforce(channelName in connStateByChannel, "Invalid channel name to unsubscribe");
 
-		connIdByChannel[channelName].removeKey(state.connId);
+		connStateByChannel[channelName] = remove!(
+			o => o is state,
+			SwapStrategy.unstable
+		)(connStateByChannel[channelName].dup);
 
-		if (connIdByChannel[channelName].empty)
+		if (connStateByChannel[channelName].length == 0)
 		{
-			connIdByChannel.remove(channelName);
+			connStateByChannel.remove(channelName);
 			RedisConnector.getInstance().unsubscribe(channelName);
 		}
 	}
@@ -104,52 +170,56 @@ struct SubscriptionManager
 private:
 	enum long channelHeartbeatInterval = 6 * 60;
 
-	alias ConnectionIdSet = RedBlackTree!ulong;
+	static ConnectionState[][string] connStateByChannel;
 
-	static Mt19937_64 rng;
-	static ConnectionState[ulong] stateMap;
-	static ConnectionIdSet[string] connIdByChannel;
-
-	static this()
-	{
-		rng.seed(unpredictableSeed!ulong);
-	}
-
-	static void redisCallback(string channelName, string message) nothrow
+	static void redisCallback(string channelName, string content) @trusted nothrow
 	{
 		if (channelName == "Error")
 		{
-			logError("Redis pubsub error: %s", message);
+			logError("Redis pubsub error: %s", content);
 			return;
 		}
 
-		if (!(channelName in connIdByChannel))
+		auto ptr = channelName in connStateByChannel;
+
+		if (ptr is null)
 		{
 			logError("Received a Redis message from an unknown channel %s", channelName);
 			return;
 		}
 
-		runTask((string name, string msg) {
-			auto connIds = array(connIdByChannel[name][]);
+		ConnectionState[] states = *ptr;
 
-			foreach (ulong id; connIds)
+		try
+		{
+			Bson bson = Bson(Bson.Type.object, cast(bdata_t)content);
+			StreamData data = StreamData.fromBSON(channelName, bson);
+
+			foreach (state; states)
 			{
-				logDebug("Pushing message to connection %d", id);
-				if (auto state = id in stateMap)
-				{
-					state.onMessage(name, msg);
-				}
+				state.processMessage(data);
 			}
-		}, channelName, message);
+		}
+		catch (Exception e)
+		{
+			debug
+			{
+				logException(e, "Error dispatching message");
+			}
+			else
+			{
+				logDebug("Error dispatching message: %s", e.msg);
+			}
+		}
 	}
 
 	static void tellSubscribed() nothrow
 	{
 		try
 		{
-			auto channelNames = array(connIdByChannel.byKey());
+			auto keys = array(connStateByChannel.byKey());
 
-			foreach (string name; channelNames)
+			foreach (string name; keys)
 			{
 				RedisConnector.getInstance().setEX(
 					format("subscribed:%r", name),
@@ -165,21 +235,20 @@ private:
 
 class ConnectionState
 {
+	debug
+	{
+		~this() @system
+		{
+			logDebug("Destroying a connection state");
+		}
+	}
+
 	static ConnectionState create(scope const(HTTPServerRequest) req) @trusted
 	{
-		auto maybeConnId = SubscriptionManager.nextConnId();
-
-		if (maybeConnId.isNull)
-		{
-			return null;
-		}
-
-		logDebug("Creating connection state with id %d", maybeConnId.get());
-
 		AuthenticationInfo authInfo = req.context.get!(AuthenticationInfo)
 			("authenticationInfo", cast(AuthenticationInfo)null);
-		ConnectionState instance = new ConnectionState(authInfo, maybeConnId.get());
-		SubscriptionManager.addState(instance);
+		ConnectionState instance = new ConnectionState(authInfo);
+		logDebug("Created a connection state");
 		instance.subscribeToSystemChannel();
 		return instance;
 	}
@@ -191,6 +260,11 @@ class ConnectionState
 
 	void subscribeToChannels(SubscriptionInfo info)
 	{
+		if (closed)
+		{
+			return;
+		}
+
 		foreach (channelId; info.channelIds)
 		{
 			StreamName[] names = streamNamesById.require(channelId, []);
@@ -213,11 +287,14 @@ class ConnectionState
 
 	void unsubscribeFromChannels(SubscriptionInfo info)
 	{
+		if (closed)
+		{
+			return;
+		}
+
 		foreach (channelId; info.channelIds)
 		{
-			auto names = channelId in streamNamesById;
-
-			if (names is null || !canFind(*names, info.streamName))
+			if (!(channelId in streamNamesById))
 			{
 				continue;
 			}
@@ -225,7 +302,7 @@ class ConnectionState
 			streamNamesById[channelId] = remove!(
 				name => name == info.streamName,
 				SwapStrategy.unstable
-			)(*names);
+			)(streamNamesById[channelId].dup);
 
 			if (streamNamesById[channelId].length == 0)
 			{
@@ -236,57 +313,148 @@ class ConnectionState
 		}
 	}
 
-	void onMessage(string channelName, string message) nothrow
-	{
-		Json json;
-
-		try
-		{
-			json = parseJsonString(message);
-		}
-		catch (Exception e)
-		{
-			logDebug("Error parsing message from Redis: %s", e.message);
-			return;
-		}
-
-		try
-		{
-			processMessage(channelName, json);
-		}
-		catch (Exception e)
-		{
-			debug
-			{
-				logException(e, "Error dispatching message");
-			}
-			else
-			{
-				logDebug("Error dispatching message: %s", e.msg);
-			}
-
-			return;
-		}
-	}
-
-	PushMessage getMessage()
-	{
-		return messagePipe.consumeOne();
-	}
-
 	void sendHeartbeat()
 	{
-		PushMessage msg = {type: MessageType.heartbeat};
-		tryPutMessage(msg);
+		if (closed)
+		{
+			return;
+		}
+
+		StreamMessage message = {
+			type: MessageType.heartbeat
+		};
+		tryPutMessage(message);
 	}
 
 	void sendError(string error)
 	{
-		PushMessage msg = {
+		if (closed)
+		{
+			return;
+		}
+
+		StreamMessage message = {
 			type: MessageType.error,
-			payload: error
+			errorMessage: error
 		};
-		tryPutMessage(msg);
+		tryPutMessage(message);
+	}
+
+	PushMessage getMessage()
+	{
+		do
+		{
+			StreamMessage message = messagePipe.consumeOne();
+
+			if (message.type == MessageType.event)
+			{
+				StreamData data = message.data;
+
+				try
+				{
+					bool blocked = data.event == "update" &&
+						filterMessage(data.channelName, data.payload);
+
+					if (blocked)
+					{
+						continue;
+					}
+				}
+				catch (Exception e)
+				{
+					logError("Error filtering message: %s", e.msg);
+				}
+
+				if (auto streamNames = data.channelName in streamNamesById)
+				{
+					PushMessage pushMessage = {
+						type: MessageType.event,
+						streamNames: *streamNames,
+						event: data.event,
+						payload: data.payload.toJson(),
+						queuedAt: data.queuedAt
+					};
+
+					return pushMessage;
+				}
+			}
+			else if (message.type == MessageType.heartbeat)
+			{
+				PushMessage pushMessage = {
+					type: MessageType.heartbeat
+				};
+
+				return pushMessage;
+			}
+			else if (message.type == MessageType.error)
+			{
+				PushMessage pushMessage = {
+					type: MessageType.error,
+					event: message.errorMessage
+				};
+
+				return pushMessage;
+			}
+			else
+			{
+				assert(false, "Unexpected message type in getMessage()");
+			}
+		} while (true);
+	}
+
+	/* A little document on message formats:
+	 *
+	 * {"event": "announcement.delete", "payload": "... (announcement.id as a string)"}
+	 *
+	 * {"event": "delete", "payload": "... (status.id as a string)"}
+	 *
+	 * {"event": "announcement", "payload": {... (Announcement object)}}
+	 *
+	 * {"event": "announcement.reaction", "payload": {... (AnnouncementReactions object)}}
+	 *
+	 * {"event": "update", "payload": {... (Status object)}}
+	 *
+	 * {"event": "status.update", "payload": {... (Status object)}}
+	 *
+	 * {"event": "notification", "payload": {... (Notification object)}}
+	 *
+	 * {"event": "update", "payload": {... (Status object)},
+	 *  "queued_at": ... (milliseconds since Unix epoch)}
+	 *
+	 * {"event": "status.update", "payload": {... (Status object)}}
+	 *  "queued_at": ... (milliseconds since Unix epoch)}
+	 *
+	 * {"event": "conversation", "payload": {... (Conversation object)},
+	 *  "queued_at": ... (milliseconds since Unix epoch)}
+	 *
+	 * {"event": "encrypted_message", "payload": {... (Conversation object)},
+	 *  "queued_at": ... (milliseconds since Unix epoch)}
+	 *
+	 * {"event": "filters_changed"}
+	 *
+	 * {"event": "kill"}
+	 *
+	 */
+	void processMessage(StreamData data)
+	{
+		if (closed)
+		{
+			return;
+		}
+
+		if (!authContext.isNull &&
+			(data.channelName == authContext.get().accessTokenChannelId ||
+				data.channelName == authContext.get().systemChannelId))
+		{
+			processSystemMessage(data.event);
+			return;
+		}
+
+		StreamMessage message = {
+			type: MessageType.event,
+			data: data
+		};
+		tryPutMessage(message);
 	}
 
 	void close() nothrow
@@ -301,7 +469,7 @@ class ConnectionState
 		try
 		{
 			messagePipe.close();
-	
+
 			foreach (string name; subscribedChannels.byKey())
 			{
 				SubscriptionManager.unsubscribe(this, name);
@@ -309,11 +477,11 @@ class ConnectionState
 	
 			if (!authContext.isNull)
 			{
-				SubscriptionManager.unsubscribe(this, authContext.get().accessTokenChannelId);
-				SubscriptionManager.unsubscribe(this, authContext.get().systemChannelId);
+				SubscriptionManager.unsubscribe(this,
+					authContext.get().accessTokenChannelId);
+				SubscriptionManager.unsubscribe(this,
+					authContext.get().systemChannelId);
 			}
-	
-			SubscriptionManager.removeState(this);
 		}
 		catch (Exception e)
 		{
@@ -321,21 +489,19 @@ class ConnectionState
 		}
 	}
 
-	immutable(ulong) connId;
-
 private:
-	this(AuthenticationInfo authInfo, ulong id)
+	this(AuthenticationInfo authInfo)
 	{
-		connId = id;
-
 		if (authInfo)
 		{
-			string accessTokenChannelId =
-				format("timeline:access_token:%d",
-					authInfo.accessTokenId);
-			string systemChannelId =
-				format("timeline:system:%d",
-					authInfo.accountId);
+			string accessTokenChannelId = format(
+				"timeline:access_token:%d",
+				authInfo.accessTokenId
+			);
+			string systemChannelId = format(
+				"timeline:system:%d",
+				authInfo.accountId
+			);
 			authContext = AuthenticationContext(
 				authInfo,
 				accessTokenChannelId,
@@ -343,7 +509,7 @@ private:
 			);
 		}
 
-		messagePipe = createChannel!(PushMessage, messagePipeCapacity);
+		messagePipe = createChannel!(StreamMessage, messagePipeCapacity)();
 	}
 
 	void subscribeToSystemChannel()
@@ -357,223 +523,143 @@ private:
 		SubscriptionManager.subscribe(this, authContext.get().systemChannelId);
 	}
 
-	void tryPutMessage(const(PushMessage) msg)
-	{
-		// Dangerous hack
-		// Only works in a single-threaded environment
-		if (messagePipe.bufferFill == messagePipeCapacity)
-		{
-			logWarn("Dropping a message because queue is full");
-			return;
-		}
-
-		logDebug("Pushing message with type %d", msg.type);
-		messagePipe.put(msg);
-	}
-
 	void processSystemMessage(string event)
 	{
 		if (event == "kill")
 		{
 			logInfo("Closing connection for %d due to expired access token",
 				authContext.get().authInfo.accountId);
-			close();
+			runTask(&close);
 		}
 	}
 
-	void processMessage(string channel, Json json)
+	void tryPutMessage(const(StreamMessage) message)
 	{
-		string event = json["event"].get!string();
-
-		if (!authContext.isNull &&
-			(channel == authContext.get().accessTokenChannelId ||
-				channel == authContext.get().systemChannelId))
+		// Dangerous hack
+		// Only works in a single-threaded environment
+		if (messagePipe.bufferFill == messagePipeCapacity)
 		{
-			processSystemMessage(event);
+			logWarn("Dropped a message because queue is full");
 			return;
 		}
 
-		Json payload = json["payload"];
-		long queuedAt = 0;
-
-		if (json["queued_at"].type() == Json.Type.int_)
-		{
-			queuedAt = json["queued_at"].get!long();
-		}
-
-		if (event == "update")
-		{
-			enforce(payload.type() == Json.Type.object,
-				"Payload must be an object");
-
-			bool localOnly =
-				payload["local_only"].type() == Json.Type.bool_ ?
-					payload["local_only"].get!bool() : false;
-	
-			if (localOnly &&
-				(authContext.isNull ||
-					!subscribedChannels[channel].allowLocalOnly))
-			{
-				logDebug("Message %s filtered because it was local-only",
-					payload["id"].get!string());
-				return;
-			}
-
-			if (subscribedChannels[channel].needsFiltering)
-			{
-				bool shouldSend = filterMessage(payload);
-	
-				if (!shouldSend)
-				{
-					return;
-				}
-			}
-		}
-
-		foreach (ref name; streamNamesById[channel])
-		{
-			logDebug("Pushing %s message to channel %s", event, name);
-
-			string encodedPayload =
-				payload.type() != Json.Type.string ?
-					serializeToJsonString(payload) :
-					payload.get!string();
-
-			PushMessage msg = {
-				type: MessageType.event,
-				streamName: name,
-				event: event,
-				payload: encodedPayload,
-				queuedAt: queuedAt
-			};
-	
-			tryPutMessage(msg);
-		}
+		logDebug("Pushing message with type %d", message.type);
+		messagePipe.put(message);
 	}
 
-	bool filterMessage(Json payload)
+	bool filterMessage(string channel, Bson payload)
 	{
-		if (authContext.isNull)
+		enforce(payload.type() == Bson.Type.object, "Payload must be an object");
+
+		bool localOnly = false;
+		string messageId = "unknown";
+		Bson account, language, mentions;
+
+		foreach (key, value; payload.byKeyValue())
 		{
+			switch (key)
+			{
+			case "local_only":
+				localOnly = value.tryReadBool(false);
+				break;
+			case "id":
+				messageId = value.get!string();
+				break;
+			case "account":
+				account = value;
+				break;
+			case "language":
+				language = value;
+				break;
+			case "mentions":
+				mentions = value;
+				break;
+			default:
+			}
+		}
+
+		if ((authContext.isNull || !subscribedChannels[channel].allowLocalOnly) &&
+			localOnly)
+		{
+			logDebug("Message %s filtered because it was local-only", messageId);
 			return true;
 		}
 
-		if (payload["language"].type() == Json.Type.string)
+		if (authContext.isNull || !subscribedChannels[channel].needsFiltering)
 		{
-			string language = payload["language"].get!string();
-			auto chosenLanguages = authContext.get().authInfo.chosenLanguages;
-
-			if (chosenLanguages.length != 0 &&
-				!chosenLanguages.canFind(language))
-			{
-				logDebug("Message %s filtered by language %s",
-					payload["id"].get!string(), language);
-				return false;
-			}
+			return false;
 		}
 
-		long acctId = authContext.get().authInfo.accountId;
-		long sourceId = payload["account"]["id"].to!long();
-		string[] accountName = payload["account"]["acct"].get!string().split("@");
-		Json mentions = payload["mentions"];
-		long[] mentionedIds;
+		enforce(account.type() == Bson.Type.object, "Account must be an object");
 
-		if (mentions.type() == Json.Type.array)
-		{
-			mentionedIds.length = mentions.length;
+		AccountInfo acctInfo = AccountInfo.fromBSON(account);
 
-			for (size_t i = 0; i < mentionedIds.length; i++)
-			{
-				mentionedIds[i] = mentions[i]["id"].to!long();
-			}
-		}
-
-		bool result = checkAccountBlock(acctId, sourceId, mentionedIds);
-
-		if (accountName.length >= 2)
-		{
-			string accountDomain = accountName[1];
-			result = result && checkDomainBlock(acctId, accountDomain);
-		}
-
-		if (!result)
-		{
-			logDebug("Message %s filtered by blocks", payload["id"].get!string());
-		}
+		bool result =
+			filterByLanguage(messageId, language) ||
+			filterByAccount(messageId, acctInfo, mentions) ||
+			filterByDomain(messageId, acctInfo);
 
 		return result;
 	}
 
-	bool checkAccountBlock(long acctId, long sourceId, long[] mentionedIds) @trusted
+	bool filterByAccount(string messageId, AccountInfo statusOwner, Bson mentions)
+	in (!authContext.isNull)
 	{
-		enum statementTemplate =
-			`SELECT 1
-			FROM blocks
-			WHERE (account_id = $1 AND target_account_id IN (%r))
-				OR (account_id = $2 AND target_account_id = $1)
-			UNION
-			SELECT 1
-			FROM mutes
-			WHERE account_id = $1 AND target_account_id IN (%r)`;
+		long ourId = authContext.get().authInfo.accountId;
+		auto mentionedIds = mentions.byValue().map!(o => AccountInfo.fromBSON(o).id);
+		bool blocked = isBlockedByAccount(ourId, statusOwner.id, mentionedIds, mentions.length);
 
-		enforce(mentionedIds.length < 126, "Too many mentioned accounts");
-
-		string[] placeholders = new string[mentionedIds.length + 1];
-
-		for (size_t i = 0; i < placeholders.length; i++)
+		if (blocked)
 		{
-			placeholders[i] = format("$%d", i + 2);
+			logDebug("Filtered message %s because it comes from a blocked or muted account",
+				messageId);
 		}
 
-		string placeholderList = placeholders.join(",");
-		string statement = format(statementTemplate, placeholderList, placeholderList);
-
-		auto conn = PostgresConnector.getInstance().lockConnection();
-		auto cmd = new PGCommand(conn, statement);
-		cmd.parameters.add(1, PGType.INT8).value = acctId;
-		cmd.parameters.add(2, PGType.INT8).value = sourceId;
-
-		for (size_t i = 0; i < mentionedIds.length; i++)
-		{
-			cmd.parameters.add(cast(short)(i + 3), PGType.INT8).value = mentionedIds[i];
-		}
-
-		auto result = cmd.executeQuery();
-		scope (exit) {
-			result.close();
-		}
-
-		if (result.empty())
-		{
-			return true;
-		}
-
-		return false;
+		return blocked;
 	}
 
-	bool checkDomainBlock(long acctId, string accountDomain) @trusted
+	bool filterByDomain(string messageId, AccountInfo statusOwner)
+	in (!authContext.isNull)
 	{
-		enum statement =
-			`SELECT 1
-			FROM account_domain_blocks
-			WHERE account_id = $1 AND domain = $2`;
+		long ourId = authContext.get().authInfo.accountId;
+		string[] accountName = statusOwner.acct.split("@");
 
-		auto conn = PostgresConnector.getInstance().lockConnection();
-		auto cmd = new PGCommand(conn, statement);
-		cmd.parameters.add(1, PGType.INT8).value = acctId;
-		cmd.parameters.add(2, PGType.TEXT).value = accountDomain;
-
-		auto result = cmd.executeQuery();
-		scope (exit) {
-			result.close();
-		}
-
-		if (result.empty())
+		if (accountName.length < 2)
 		{
-			return true;
+			return false;
 		}
 
-		return false;
+		string accountDomain = accountName[1];
+		bool blocked = isBlockedByDomain(ourId, accountDomain);
+
+		if (blocked)
+		{
+			logDebug("Filtered message %s because it is from domain %s",
+				messageId, accountDomain);
+		}
+
+		return blocked;
+	}
+
+	bool filterByLanguage(string messageId, Bson language)
+	in (!authContext.isNull)
+	{
+		if (language.type() != Bson.Type.string)
+		{
+			return false;
+		}
+
+		auto chosenLanguages = authContext.get().authInfo.chosenLanguages;
+		string langName = language.get!string();
+		bool blocked = chosenLanguages.length != 0 && !chosenLanguages.canFind(langName);
+
+		if (blocked)
+		{
+			logDebug("Filtered message %s because it is in language %s",
+				messageId, langName);
+		}
+
+		return blocked;
 	}
 
 	const struct AuthenticationContext
@@ -588,7 +674,7 @@ private:
 	StreamName[][string] streamNamesById;
 
 	enum messagePipeCapacity = 8;
-	Channel!(PushMessage, messagePipeCapacity) messagePipe;
+	Channel!(StreamMessage, messagePipeCapacity) messagePipe;
 
 	bool closed = false;
 }

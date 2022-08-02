@@ -4,6 +4,7 @@ import mastoduck.auth;
 import mastoduck.channel;
 import mastoduck.env;
 import mastoduck.stream;
+import mastoduck.util;
 
 import std.algorithm.comparison : max, min;
 import std.format : format;
@@ -107,22 +108,6 @@ string channelNameFromPath(HTTPServerRequest req)
 	return onlyMedia ? onlyMediaChannels.get(channelName, channelName) : channelName;
 }
 
-T getValue(T)(Json json, string key, lazy T defaultValue)
-{
-	enforce(json.type() == Json.Type.object, "Attempting to getValue on non-object");
-
-	Json val = json[key];
-
-	if (val.type() == Json.Type.undefined)
-	{
-		return defaultValue();
-	}
-	else
-	{
-		return val.get!T();
-	}
-}
-
 bool subscribeByURL(alias onSuccess, alias onError)
 	(ConnectionState connState, HTTPServerRequest req, string channelName)
 {
@@ -133,7 +118,7 @@ bool subscribeByURL(alias onSuccess, alias onError)
 
 	bool result;
 
-	SubscriptionRequest sr = {
+	SubscriptionRequest request = {
 		authInfo: connState.getAuthInfo(),
 		channelName: channelName,
 		listId: req.query.get("list", ""),
@@ -141,7 +126,7 @@ bool subscribeByURL(alias onSuccess, alias onError)
 		allowLocalOnly: req.isParamTruthy("allow_local_only")
 	};
 
-	requestToSubscriptionInfo(sr).match!(
+	requestToSubscriptionInfo(request).match!(
 		(SubscriptionInfo info) {
 			onSuccess(info);
 			result = true;
@@ -160,7 +145,7 @@ bool subscribeByJSON(alias onSuccess, alias onError)
 {
 	bool result;
 
-	SubscriptionRequest sr = {
+	SubscriptionRequest request = {
 		authInfo: connState.getAuthInfo(),
 		channelName: json.getValue!string("stream", ""),
 		listId: json.getValue!string("list", ""),
@@ -168,7 +153,7 @@ bool subscribeByJSON(alias onSuccess, alias onError)
 		allowLocalOnly: json.getValue!bool("allow_local_only", false)
 	};
 
-	requestToSubscriptionInfo(sr).match!(
+	requestToSubscriptionInfo(request).match!(
 		(SubscriptionInfo info) {
 			onSuccess(info);
 			result = true;
@@ -182,27 +167,26 @@ bool subscribeByJSON(alias onSuccess, alias onError)
 	return result;
 }
 
-void checkDeliverTime(PushMessage msg)
+void checkDeliveryTime(PushMessage message)
 {
-	if (msg.queuedAt == 0)
+	if (message.queuedAt == 0)
 	{
 		return;
 	}
 
 	long now = Clock.currTime.toUnixTime!long;
-	long queuedAt = msg.queuedAt / 1000;
+	long queuedAt = message.queuedAt / 1000;
 
 	if (now - queuedAt > 5)
 	{
 		debug
 		{
-			logWarn("A message from %s took more than 5 seconds to send! payload: %s",
-				msg.streamName, msg.payload);
+			logWarn("A message (event %s) took more than 5 seconds to send! payload: %s",
+				message.event, message.payload);
 		}
 		else
 		{
-			logWarn("A message from %s took more than 5 seconds to send!",
-				msg.streamName);
+			logWarn("A message (event %s) took more than 5 seconds to send!", message.event);
 		}
 	}
 }
@@ -265,46 +249,48 @@ void handleHTTPConnection(HTTPServerRequest req, HTTPServerResponse res)
 	{
 		try
 		{
-			PushMessage msg = connState.getMessage();
-	
-			final switch (msg.type)
+			PushMessage message = connState.getMessage();
+
+			if (message.type == MessageType.event)
 			{
-			case MessageType.event:
-				res.bodyWriter.write(
-					format("event: %r\ndata: %r\n\n",
-						msg.event, msg.payload));
+				string payload = message.payload.to!string();
+
+				logDebug("Pushing %s message to streams %(%s, %)",
+					message.event, message.streamNames);
+
+				foreach (name; message.streamNames)
+				{
+					res.bodyWriter.write(
+						format("event: %r\ndata: %r\n\n",
+							message.event, payload));
+				}
+
 				res.bodyWriter.flush();
-				checkDeliverTime(msg);
-				break;
-			case MessageType.heartbeat:
+				checkDeliveryTime(message);
+			}
+			else if (message.type == MessageType.heartbeat)
+			{
 				res.bodyWriter.write(":thump\n");
 				res.bodyWriter.flush();
-				break;
-			case MessageType.error:
-				res.bodyWriter.write(format("error: %r\n", msg.payload));
+			}
+			else if (message.type == MessageType.error)
+			{
+				res.bodyWriter.write(
+					format("error: %r\n", message.event));
 				res.bodyWriter.flush();
 				return;
 			}
 		}
 		catch (Exception e)
 		{
+			debug
+			{
+				logException(e, "HTTP streaming handler returning");
+			}
+
 			return;
 		}
 	}
-}
-
-Json toJsonArray(StreamName stream)
-{
-	Json obj = Json.emptyArray;
-
-	obj.appendArrayElement(Json(stream.channelName));
-
-	if (!stream.extra.isNull)
-	{
-		obj.appendArrayElement(Json(stream.extra.get()));
-	}
-
-	return obj;
 }
 
 void handleWSConnection(scope WebSocket sock)
@@ -421,37 +407,61 @@ void handleWSConnection(scope WebSocket sock)
 
 	scope (exit)
 	{
-		logDebug("Ending stream for %s", req.peer);
+		logDebug("Stopping streaming for %s", req.peer);
+		connState.close();
 		reader.interrupt();
+		reader.join();
+		logDebug("Ended stream for %s", req.peer);
 	}
 
 	while (sock.connected)
 	{
 		try
 		{
-			PushMessage msg = connState.getMessage();
+			PushMessage message = connState.getMessage();
 	
-			final switch (msg.type)
+			if (message.type == MessageType.event)
 			{
-			case MessageType.event:
-				sock.send(serializeToJsonString([
-					"stream": msg.streamName.get().toJsonArray(),
-					"event": Json(msg.event),
-					"payload": Json(msg.payload)
-				]));
-				checkDeliverTime(msg);
-				break;
-			case MessageType.heartbeat:
-				break;
-			case MessageType.error:
-				sock.send(serializeToJsonString([
-					"error": msg.payload
-				]));
-				break;
+				Json event = Json(message.event);
+				Json payload = message.payload;
+
+				if (payload.type() == Json.Type.object)
+				{
+					payload = Json(serializeToJsonString(payload));
+				}
+
+				logDebug("Pushing %s message to streams %(%s, %)",
+					message.event, message.streamNames);
+
+				foreach (name; message.streamNames)
+				{
+					string data = serializeToJsonString([
+						"stream": name.toJsonArray(),
+						"event": event,
+						"payload": payload
+					]);
+
+					sock.send(data);
+				}
+
+				checkDeliveryTime(message);
+			}
+			else if (message.type == MessageType.error)
+			{
+				string data = serializeToJsonString([
+					"error": message.event
+				]);
+
+				sock.send(data);
 			}
 		}
 		catch (Exception e)
 		{
+			debug
+			{
+				logException(e, "WebSockets handler returning");
+			}
+
 			return;
 		}
 	}
@@ -492,6 +502,15 @@ auto buildRequestHandler()
 	router.get("/api/v1/streaming/health", (req, res) {
 		res.writeBody("OK", "text/plain");
 	});
+
+	debug
+	{
+		router.get("/debug/force_gc", (req, res) {
+			import core.memory;
+			GC.collect();
+			res.writeBody("Done", "text/plain");
+		});
+	}
 
 	router.any("*", &authenticateClient);
 

@@ -2,7 +2,7 @@ module mastoduck.auth;
 import mastoduck.db;
 
 import std.string : split;
-import std.typecons;
+import std.typecons : Nullable;
 
 import ddb.postgres : PGCommand, PGType;
 
