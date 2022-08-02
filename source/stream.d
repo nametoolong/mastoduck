@@ -279,13 +279,13 @@ class ConnectionState
 
 	void subscribeToChannels(SubscriptionInfo info)
 	{
-		if (closed)
-		{
-			return;
-		}
-
 		foreach (channelId; info.channelIds)
 		{
+			if (closed)
+			{
+				return;
+			}
+
 			StreamName[] names = streamNamesById.require(channelId, []);
 
 			if (canFind(names, info.streamName))
@@ -306,13 +306,13 @@ class ConnectionState
 
 	void unsubscribeFromChannels(SubscriptionInfo info)
 	{
-		if (closed)
-		{
-			return;
-		}
-
 		foreach (channelId; info.channelIds)
 		{
+			if (closed)
+			{
+				return;
+			}
+
 			if (!(channelId in streamNamesById))
 			{
 				continue;
@@ -485,26 +485,29 @@ class ConnectionState
 
 		closed = true;
 
-		try
-		{
-			messagePipe.close();
-
-			foreach (string name; subscribedChannels.byKey())
+		auto unsubscribeFrom = (string name) nothrow {
+			try
 			{
 				SubscriptionManager.unsubscribe(this, name);
 			}
-	
-			if (!authContext.isNull)
+			catch (Exception e)
 			{
-				SubscriptionManager.unsubscribe(this,
-					authContext.get().accessTokenChannelId);
-				SubscriptionManager.unsubscribe(this,
-					authContext.get().systemChannelId);
+				logDebug("Error unsubscribing from channel %s: %s",
+					name, e.msg);
 			}
-		}
-		catch (Exception e)
+		};
+
+		messagePipe.close();
+
+		foreach (string name; subscribedChannels.byKey())
 		{
-			logError("Error cleaning up connection state: %s", e.msg);
+			unsubscribeFrom(name);
+		}
+
+		if (!authContext.isNull)
+		{
+			unsubscribeFrom(authContext.get().accessTokenChannelId);
+			unsubscribeFrom(authContext.get().systemChannelId);
 		}
 	}
 
