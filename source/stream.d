@@ -142,6 +142,7 @@ struct SubscriptionManager
 
 		connStateByChannel[channelName] ~= state;
 		RedisConnector.getInstance().subscribe(channelName);
+		setSubscribedFlag(channelName);
 	}
 
 	static void unsubscribe(ConnectionState state, string channelName)
@@ -221,15 +222,20 @@ private:
 
 			foreach (string name; keys)
 			{
-				RedisConnector.getInstance().setEX(
-					format("subscribed:%r", name),
-					"1", 3 * channelHeartbeatInterval);
+				setSubscribedFlag(name);
 			}
 		}
 		catch (Exception e)
 		{
 			logFatal("Redis connection error: %s", e.msg);
 		}
+	}
+
+	static void setSubscribedFlag(string channelName)
+	{
+		RedisConnector.getInstance().setEX(
+			format("subscribed:%r", channelName),
+			"1", 3 * channelHeartbeatInterval);
 	}
 }
 
