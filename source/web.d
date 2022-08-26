@@ -253,8 +253,6 @@ void handleHTTPConnection(HTTPServerRequest req, HTTPServerResponse res)
 
 			if (message.type == MessageType.event)
 			{
-				string payload = message.payload.to!string();
-
 				logDebug("Pushing %s message to streams %(%s, %)",
 					message.event, message.streamNames);
 
@@ -262,7 +260,7 @@ void handleHTTPConnection(HTTPServerRequest req, HTTPServerResponse res)
 				{
 					res.bodyWriter.write(
 						format("event: %r\ndata: %r\n\n",
-							message.event, payload));
+							message.event, message.payload));
 				}
 
 				res.bodyWriter.flush();
@@ -422,14 +420,6 @@ void handleWSConnection(scope WebSocket sock)
 	
 			if (message.type == MessageType.event)
 			{
-				Json event = Json(message.event);
-				Json payload = message.payload;
-
-				if (payload.type() == Json.Type.object)
-				{
-					payload = Json(serializeToJsonString(payload));
-				}
-
 				logDebug("Pushing %s message to streams %(%s, %)",
 					message.event, message.streamNames);
 
@@ -437,8 +427,8 @@ void handleWSConnection(scope WebSocket sock)
 				{
 					string data = serializeToJsonString([
 						"stream": name.toJsonArray(),
-						"event": event,
-						"payload": payload
+						"event": Json(message.event),
+						"payload": Json(message.payload)
 					]);
 
 					sock.send(data);

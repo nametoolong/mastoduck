@@ -124,7 +124,7 @@ const struct PushMessage
 	MessageType type;
 	StreamName[] streamNames;
 	string event;
-	Json payload;
+	string payload;
 	long queuedAt;
 }
 
@@ -386,11 +386,22 @@ class ConnectionState
 
 				if (auto streamNames = data.channelName in streamNamesById)
 				{
+					string payload;
+
+					if (data.payload.type == Bson.Type.string)
+					{
+						payload = data.payload.get!string;
+					}
+					else
+					{
+						payload = data.payload.toJsonString();
+					}
+
 					PushMessage pushMessage = {
 						type: MessageType.event,
 						streamNames: *streamNames,
 						event: data.event,
-						payload: data.payload.toJson(),
+						payload: payload,
 						queuedAt: data.queuedAt
 					};
 
