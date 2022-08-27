@@ -8,7 +8,7 @@ import std.range.primitives : isInputRange;
 
 import ddb.postgres : PGCommand, PGType;
 
-enum maxMentions = 125;
+enum maxMentions = 64;
 enum placeholdersTemplate = generatePlaceholders!(2, maxMentions + 1);
 
 string generatePlaceholders(int start, int n)()
