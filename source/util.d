@@ -180,3 +180,51 @@ void jsonEscape(R)(ref R dst, const(char)[] s)
 	// last interval
 	putInterval(s.length);
 }
+
+unittest
+{
+	import std.algorithm.searching : startsWith;
+	import std.exception;
+
+	assertThrown(Json().getValue!bool("key", false));
+	assertThrown(Json([0, 1, 2]).getValue!bool("key", false));
+
+	assert(Json(["key": Json("value")]).getValue!int("", 345) == 345);
+	assert(Json(["key": Json("value")]).getValue!int("key", 345) == 345);
+	assert(Json(["key": Json("value")]).getValue!string("key", "345") == "value");
+
+	assert(StreamName("abc").toJsonArray().toString() == `["abc"]`);
+	assert(StreamName("abc", "def").toJsonArray().toString() == `["abc","def"]`);
+
+	assert(Bson("").tryReadBool(true) == true);
+	assert(Bson("").tryReadBool(false) == false);
+	assert(Bson(false).tryReadBool(true) == false);
+	assert(Bson("").tryReadInteger(8765L) == 8765L);
+	assert(Bson(false).tryReadInteger(80L) == 80L);
+	assert(Bson(12345).tryReadInteger(0L) == 12345L);
+	assert(Bson(12345678912L).tryReadInteger(0L) == 12345678912L);
+
+	assert(Bson(null).toJsonString() == `null`);
+	assert(Bson(true).toJsonString() == `true`);
+	assert(Bson(false).toJsonString() == `false`);
+	assert(Bson(0).toJsonString() == `0`);
+	assert(Bson(-50).toJsonString() == `-50`);
+	assert(Bson(10000).toJsonString() == `10000`);
+	assert(Bson(12345678912L).toJsonString() == `12345678912`);
+	assert(Bson(4.0).toJsonString() == `4`);
+	assert(Bson(3.14159265358979323846).toJsonString().length >= 17 &&
+		Bson(3.14159265358979323846).toJsonString().length <= 19);
+	assert(Bson(3.14159265358979323846).toJsonString().startsWith("3.141592653589793"));
+	assert(Bson("").toJsonString() == `""`);
+	assert(Bson("测试").toJsonString() == `"测试"`);
+	assert(Bson("😋test").toJsonString() == `"😋test"`);
+	assert(Bson(cast(Bson[])[]).toJsonString() == `[]`);
+	assert(Bson([Bson(cast(Bson[])[])]).toJsonString() == `[[]]`);
+	assert(Bson([Bson([Bson(null)])]).toJsonString() == `[[null]]`);
+	assert(Bson([Bson(1), Bson("2"), Bson([Bson(3), Bson("4")])]).toJsonString() == `[1,"2",[3,"4"]]`);
+
+	Bson[string] emptyObj;
+	assert(Bson(emptyObj).toJsonString() == `{}`);
+	assert(Bson(["key": Bson(emptyObj)]).toJsonString() == `{"key":{}}`);
+	assert(Bson(["key": Bson([Bson(1), Bson(["1": Bson("2"), "3": Bson(4)]), Bson(null)])]).toJsonString() == `{"key":[1,{"1":"2","3":4},null]}`);
+}
