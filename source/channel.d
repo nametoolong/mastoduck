@@ -21,6 +21,12 @@ alias ChannelDefaults = Tuple!(string, "channelId", Ternary, "localOnly");
 immutable(ChannelDefaults[string]) publicChannels;
 immutable(ChannelDefaults[string]) hashTagChannels;
 
+immutable dstring nonAsciiChars = `ÀÁÂÃÄÅàáâãäåĀāĂăĄąÇçĆćĈĉĊċČčÐðĎďĐđÈÉÊËèéêëĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħÌÍÎÏìíîïĨĩĪīĬĭĮįİıĴĵĶķĸĹĺĻļĽľĿŀŁłÑñŃńŅņŇňŉŊŋÒÓÔÕÖØòóôõöøŌōŎŏŐőŔŕŖŗŘřŚśŜŝŞşŠšſŢţŤťŦŧÙÚÛÜùúûüŨũŪūŬŭŮůŰűŲųŴŵÝýÿŶŷŸŹźŻżŽž`;
+immutable dstring equivalentAsciiChars = `AAAAAAaaaaaaAaAaAaCcCcCcCcCcDdDdDdEEEEeeeeEeEeEeEeEeGgGgGgGgHhHhIIIIiiiiIiIiIiIiIiJjKkkLlLlLlLlLlNnNnNnNnnNnOOOOOOooooooOoOoOoRrRrRrSsSsSsSssTtTtTtUUUUuuuuUuUuUuUuUuUuWwYyyYyYZzZzZz`;
+immutable(dchar[dchar]) asciiConversionTable;
+
+static assert(nonAsciiChars.length == equivalentAsciiChars.length);
+
 shared static this()
 {
 	publicChannels["public"] = ChannelDefaults("timeline:public", Ternary.unknown);
@@ -31,6 +37,11 @@ shared static this()
 	publicChannels["public:remote:media"] = ChannelDefaults("timeline:public:remote:media", Ternary.no);
 	hashTagChannels["hashtag"] = ChannelDefaults("timeline:hashtag:%r", Ternary.yes);
 	hashTagChannels["hashtag:local"] = ChannelDefaults("timeline:hashtag:%r:local", Ternary.yes);
+
+	foreach (size_t i, dchar ch; nonAsciiChars)
+	{
+		asciiConversionTable[ch] = equivalentAsciiChars[i];
+	}
 }
 
 enum SubscriptionOption
@@ -50,7 +61,7 @@ const struct SubscriptionRequest
 	bool allowLocalOnly;
 }
 
-struct StreamName
+const struct StreamName
 {
 	string channelName;
 	Nullable!(string, null) extra;
@@ -99,51 +110,14 @@ SubscriptionResult requestToSubscriptionInfo(scope SubscriptionRequest request)
 	}
 	else if (auto defaults = channelName in hashTagChannels)
 	{
-		if (request.tagName.length == 0)
-		{
-			return errorResult("No tag for stream provided");
-		}
-
 		return publicChannelInfo(channelName, *defaults, true, request.tagName);
 	}
 	else if (channelName == "list")
 	{
-		long listId;
-
-		try
-		{
-			listId = to!long(request.listId);
-		}
-		catch (Exception e)
-		{
-			return errorResult("Invalid list id");
-		}
-
-		if (!authorizeListAccess(authInfo, listId))
-		{
-			return errorResult("Not authorized to stream this list");
-		}
-
-		return successResult(
-			StreamName(channelName, request.listId),
-			[format("timeline:list:%d", listId)],
-			SubscriptionFlags.init | SubscriptionOption.allowLocalOnly
-		);
+		return listChannelInfo(authInfo, request.listId);
 	}
 	else
 	{
-		logDebug("Checking OAuth scopes for %s", channelName);
-
-		bool isNotificationChannel = channelName == "user:notification";
-		bool scopesMatch = isNotificationChannel ?
-			authInfo.isInScope("read", "read:notifications") :
-			authInfo.isInScope("read", "read:statuses");
-
-		if (!scopesMatch)
-		{
-			return errorResult("Access token does not cover required scopes");
-		}
-
 		return userChannelInfo(authInfo, channelName);
 	}
 }
@@ -169,8 +143,6 @@ SubscriptionResult publicChannelInfo(
 	bool allowLocalOnly,
 	string tag = null)
 {
-	import std.string : strip;
-	import std.uni : toLower;
 
 	SubscriptionFlags flags;
 	flags |= SubscriptionOption.needsFiltering;
@@ -183,11 +155,16 @@ SubscriptionResult publicChannelInfo(
 
 	if (tag)
 	{
-		string tagChannelId = tag.strip().toLower();
+		string normalizedTag = normalizeTag(tag);
+
+		if (normalizedTag.length == 0)
+		{
+			return errorResult("Invalid tag name");
+		}
 
 		return successResult(
 			StreamName(channelName, tag),
-			[format(defaults.channelId, tagChannelId)],
+			[format(defaults.channelId, normalizedTag)],
 			flags
 		);
 	}
@@ -201,19 +178,50 @@ SubscriptionResult publicChannelInfo(
 	}
 }
 
-SubscriptionResult userChannelInfo(AuthenticationInfo authInfo, string name)
+SubscriptionResult listChannelInfo(AuthenticationInfo authInfo, string listIdStr)
 {
-	if (!authInfo)
+	long listId;
+
+	try
 	{
-		return errorResult("Missing access token");
+		listId = to!long(listIdStr);
+	}
+	catch (Exception e)
+	{
+		return errorResult("Invalid list id");
+	}
+
+	if (!authorizeListAccess(authInfo, listId))
+	{
+		return errorResult("Not authorized to stream this list");
+	}
+
+	return successResult(
+		StreamName("list", listIdStr),
+		[format("timeline:list:%d", listId)],
+		SubscriptionFlags.init | SubscriptionOption.allowLocalOnly
+	);
+}
+
+SubscriptionResult userChannelInfo(AuthenticationInfo authInfo, string channelName)
+{
+	logDebug("Checking OAuth scopes for %s", channelName);
+
+	bool isNotificationChannel = channelName == "user:notification";
+	bool scopesMatch = isNotificationChannel ?
+		authInfo.isInScope("read", "read:notifications") :
+		authInfo.isInScope("read", "read:statuses");
+
+	if (!scopesMatch)
+	{
+		return errorResult("Access token does not cover required scopes");
 	}
 
 	auto accountId = toChars(authInfo.accountId);
-
-	StreamName streamName = StreamName(name);
+	StreamName streamName = StreamName(channelName);
 	SubscriptionFlags flags = SubscriptionFlags.init | SubscriptionOption.allowLocalOnly;
 
-	switch (name)
+	switch (channelName)
 	{
 	case "user":
 		return successResult(
@@ -238,6 +246,39 @@ SubscriptionResult userChannelInfo(AuthenticationInfo authInfo, string name)
 	}
 }
 
+string normalizeTag(string tag) @trusted
+{
+	import std.encoding;
+	import std.string;
+	import std.regex;
+	import std.uni;
+
+	if (!tag.isValid())
+	{
+		return "";
+	}
+
+	dchar[] tagNameUtf32;
+	tag.transcode(tagNameUtf32);
+	tagNameUtf32 = tagNameUtf32.strip().normalize!NFKC();
+	tagNameUtf32.toLowerInPlace();
+
+	foreach (ref dchar ch; tagNameUtf32)
+	{
+		if (auto substitute = ch in asciiConversionTable)
+		{
+			ch = *substitute;
+		}
+	}
+
+	enum regex = regex("[^\\p{L}\\p{N}_\\u00b7\\u200c]"d);
+	tagNameUtf32 = tagNameUtf32.replaceAll(regex, ""d);
+
+	string normalizedTag;
+	tagNameUtf32.transcode(normalizedTag);
+	return normalizedTag;
+}
+
 bool isInScope(Types...)(AuthenticationInfo authInfo, Types requiredScopes)
 	if (Types.length != 0 && allSatisfy!(isSomeString, Types))
 {
@@ -258,8 +299,7 @@ bool isInScope(Types...)(AuthenticationInfo authInfo, Types requiredScopes)
 }
 
 immutable(string[])
-channelsForUserStream(Range)
-	(AuthenticationInfo authInfo, Range accountId)
+channelsForUserStream(Range)(AuthenticationInfo authInfo, Range accountId)
 in (authInfo !is null)
 {
 	string[] channelIds;
@@ -278,4 +318,349 @@ in (authInfo !is null)
 	}
 
 	return channelIds.idup;
+}
+
+unittest
+{
+	// The tests are taken from Mastodon's hashtag_normalizer_spec.rb
+	assert(normalizeTag("Ｓｙｎｔｈｗａｖｅ") == "synthwave");
+	assert(normalizeTag("ｼｰｻｲﾄﾞﾗｲﾅｰ") == "シーサイドライナー");
+	assert(normalizeTag("BLÅHAJ") == "blahaj");
+	assert(normalizeTag("#foo") == "foo");
+	assert(normalizeTag("a·b") == "a·b");
+
+	// Invalid tags
+	assert(normalizeTag(" ") == "");
+	assert(normalizeTag("\x80\x99") == "");
+}
+
+@system:
+unittest
+{
+	bool conditionsHold(bool[] cond...)
+	{
+		import std.algorithm.iteration : fold;
+		return cond.fold!((a, b) => a && b)(true);
+	}
+
+	assert(publicChannelInfo("public", publicChannels["public"], false).match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "public",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:public",
+			(cast(int) info.flags) ==
+				SubscriptionOption.needsFiltering
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(publicChannelInfo("public", publicChannels["public"], true).match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "public",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:public",
+			(cast(int) info.flags) == (
+				SubscriptionOption.needsFiltering |
+				SubscriptionOption.allowLocalOnly
+			)
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(publicChannelInfo("public:local", publicChannels["public:local"], false).match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "public:local",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:public:local",
+			(cast(int) info.flags) == (
+				SubscriptionOption.needsFiltering |
+				SubscriptionOption.allowLocalOnly
+			)
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(publicChannelInfo("public:remote", publicChannels["public:remote"], true).match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "public:remote",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:public:remote",
+			(cast(int) info.flags) ==
+				SubscriptionOption.needsFiltering
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(publicChannelInfo("hashtag", hashTagChannels["hashtag"], false, "").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Invalid tag name"
+	));
+
+	assert(publicChannelInfo("hashtag", hashTagChannels["hashtag"], false, " \x80\x99 ").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Invalid tag name"
+	));
+
+	assert(publicChannelInfo("hashtag", hashTagChannels["hashtag"], true, "BLÅHAJ").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "hashtag",
+			info.streamName.extra.get() == "BLÅHAJ",
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:hashtag:blahaj",
+			(cast(int) info.flags) == (
+				SubscriptionOption.needsFiltering |
+				SubscriptionOption.allowLocalOnly
+			)
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(listChannelInfo(null, "").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Invalid list id"
+	));
+
+	assert(listChannelInfo(null, "a").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Invalid list id"
+	));
+
+	assert(listChannelInfo(null, "-1").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Not authorized to stream this list"
+	));
+
+	assert(userChannelInfo(null, "user").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Access token does not cover required scopes"
+	));
+
+	assert(userChannelInfo(null, "user:notification").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Access token does not cover required scopes"
+	));
+
+	AuthenticationInfo authInfo = new AuthenticationInfo(
+		AuthenticationInfo.Row(1234, 5678, [], "whatever read crypto", Nullable!long(8765))
+	);
+
+	assert(userChannelInfo(authInfo, "user").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "user",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 3,
+			info.channelIds[0] == "timeline:5678",
+			info.channelIds[1] == "timeline:5678:8765",
+			info.channelIds[2] == "timeline:5678:notifications",
+			(cast(int) info.flags) ==
+				SubscriptionOption.allowLocalOnly
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(userChannelInfo(authInfo, "user:notification").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "user:notification",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:5678:notifications",
+			(cast(int) info.flags) ==
+				SubscriptionOption.allowLocalOnly
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(userChannelInfo(authInfo, "direct").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "direct",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:direct:5678",
+			(cast(int) info.flags) ==
+				SubscriptionOption.allowLocalOnly
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(userChannelInfo(authInfo, "unknown").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Invalid channel name"
+	));
+
+	AuthenticationInfo authInfoScopeNotifications = new AuthenticationInfo(
+		AuthenticationInfo.Row(1234, 5678, [], "read:notifications", Nullable!long.init)
+	);
+
+	assert(userChannelInfo(authInfoScopeNotifications, "user").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Access token does not cover required scopes"
+	));
+
+	assert(userChannelInfo(authInfoScopeNotifications, "user:notification").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "user:notification",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:5678:notifications",
+			(cast(int) info.flags) ==
+				SubscriptionOption.allowLocalOnly
+		),
+		(SubscriptionError err) => false
+	));
+
+	AuthenticationInfo authInfoScopeStatuses = new AuthenticationInfo(
+		AuthenticationInfo.Row(1234, 5678, [], "read:statuses", Nullable!long(8765))
+	);
+
+	assert(userChannelInfo(authInfoScopeStatuses, "user").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "user",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:5678",
+			(cast(int) info.flags) ==
+				SubscriptionOption.allowLocalOnly
+		),
+		(SubscriptionError err) => false
+	));
+
+	assert(userChannelInfo(authInfoScopeStatuses, "user:notification").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Access token does not cover required scopes"
+	));
+
+	AuthenticationInfo authInfoNoDeviceId = new AuthenticationInfo(
+		AuthenticationInfo.Row(1234, 5678, [], "whatever read crypto", Nullable!long.init)
+	);
+
+	assert(userChannelInfo(authInfoNoDeviceId, "user").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "user",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 2,
+			info.channelIds[0] == "timeline:5678",
+			info.channelIds[1] == "timeline:5678:notifications",
+			(cast(int) info.flags) ==
+				SubscriptionOption.allowLocalOnly
+		),
+		(SubscriptionError err) => false
+	));
+
+	AuthenticationInfo authInfoNoCrypto = new AuthenticationInfo(
+		AuthenticationInfo.Row(1234, 5678, [], "whatever read", Nullable!long(8765))
+	);
+
+	assert(userChannelInfo(authInfoNoCrypto, "user").match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "user",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 2,
+			info.channelIds[0] == "timeline:5678",
+			info.channelIds[1] == "timeline:5678:notifications",
+			(cast(int) info.flags) ==
+				SubscriptionOption.allowLocalOnly
+		),
+		(SubscriptionError err) => false
+	));
+
+	AuthenticationInfo authInfoNoScope = new AuthenticationInfo(
+		AuthenticationInfo.Row(0, 0, [], "whatever", Nullable!long.init)
+	);
+
+	assert(userChannelInfo(authInfoNoScope, "user").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Access token does not cover required scopes"
+	));
+
+	assert(userChannelInfo(authInfoNoScope, "user:notification").match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Access token does not cover required scopes"
+	));
+
+	SubscriptionRequest requestPublic = {
+		authInfo: null,
+		channelName: "public",
+		listId: "",
+		tagName: "",
+		allowLocalOnly: true
+	};
+
+	assert(requestToSubscriptionInfo(requestPublic).match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "public",
+			info.streamName.extra.isNull,
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:public",
+			(cast(int) info.flags) == (
+				SubscriptionOption.needsFiltering |
+				SubscriptionOption.allowLocalOnly
+			)
+		),
+		(SubscriptionError err) => false
+	));
+
+	SubscriptionRequest requestHashtag = {
+		authInfo: null,
+		channelName: "hashtag",
+		listId: "",
+		tagName: "Meow!",
+		allowLocalOnly: true
+	};
+
+	assert(requestToSubscriptionInfo(requestHashtag).match!(
+		(SubscriptionInfo info) => conditionsHold(
+			info.streamName.channelName == "hashtag",
+			info.streamName.extra.get() == "Meow!",
+			info.channelIds.length == 1,
+			info.channelIds[0] == "timeline:hashtag:meow",
+			(cast(int) info.flags) == (
+				SubscriptionOption.needsFiltering |
+				SubscriptionOption.allowLocalOnly
+			)
+		),
+		(SubscriptionError err) => false
+	));
+
+	SubscriptionRequest requestListInvalid = {
+		authInfo: null,
+		channelName: "list",
+		listId: "a",
+		tagName: "",
+		allowLocalOnly: false
+	};
+
+	assert(requestToSubscriptionInfo(requestListInvalid).match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Invalid list id"
+	));
+
+	SubscriptionRequest requestListNonexistent = {
+		authInfo: null,
+		channelName: "list",
+		listId: "-1",
+		tagName: "",
+		allowLocalOnly: false
+	};
+
+	assert(requestToSubscriptionInfo(requestListNonexistent).match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Not authorized to stream this list"
+	));
+
+	SubscriptionRequest requestUser = {
+		authInfo: null,
+		channelName: "user",
+		listId: "",
+		tagName: "",
+		allowLocalOnly: false
+	};
+
+	assert(requestToSubscriptionInfo(requestUser).match!(
+		(SubscriptionInfo info) => false,
+		(SubscriptionError err) => err.msg == "Access token does not cover required scopes"
+	));
 }
