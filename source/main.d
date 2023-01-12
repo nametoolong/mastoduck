@@ -10,13 +10,19 @@ import std.typecons : Tuple;
 
 import vibe.vibe;
 
-immutable(string[string]) getDbSettings()
+alias PostgresSettings = Tuple!(
+	immutable(string[string]), "params",
+	uint, "concurrency"
+);
+
+immutable(PostgresSettings) getDbSettings()
 {
 	string hostVar = Env["DB_HOST"];
 	string portVar = Env["DB_PORT"];
 	string userVar = Env["DB_USER"];
 	string passVar = Env["DB_PASS"];
 	string dbName = Env["DB_NAME"];
+	string poolSize = Env["DB_POOL"];
 
 	if (!dbName) {
 		final switch (Env.envType)
@@ -35,13 +41,16 @@ immutable(string[string]) getDbSettings()
 		}
 	}
 
-	return [
-		"host": hostVar.length != 0 ? hostVar : "localhost",
-		"port": portVar.length != 0 ? portVar : "5432" ,
-		"user": userVar.length != 0 ? userVar : "mastodon",
-		"password": passVar,
-		"database": dbName
-	];
+	return PostgresSettings(
+		[
+			"host": hostVar.length != 0 ? hostVar : "localhost",
+			"port": portVar.length != 0 ? portVar : "5432" ,
+			"user": userVar.length != 0 ? userVar : "mastodon",
+			"password": passVar,
+			"database": dbName
+		],
+		poolSize.length != 0 ? to!uint(poolSize) : 16
+	);
 }
 
 alias RedisSettings = Tuple!(
@@ -89,7 +98,7 @@ void main()
 		setLogLevel(LogLevel.verbose4);
 	}
 
-	PostgresConnector.initialize(getDbSettings());
+	PostgresConnector.initialize(getDbSettings().expand);
 	scope (exit)
 	{
 		PostgresConnector.cleanup();

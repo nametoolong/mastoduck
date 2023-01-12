@@ -55,10 +55,10 @@ public:
 	}
 
 protected:
-	this(immutable(string[string]) settings)
+	this(immutable(string[string]) settings, uint concurrency)
 	{
 		dbSettings = settings;
-		connectionPool = new ConnectionPool!PGConnection(&createConnection, 16);
+		connectionPool = new ConnectionPool!PGConnection(&createConnection, concurrency);
 	}
 
 	override void doCleanup()
