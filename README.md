@@ -2,9 +2,7 @@
 
 > If it looks like a mastodon, swims like a mastodon and toots like a mastodon, then it probably is a mastodon.
 
-Mastoduck is a reimplementation of Mastodon's streaming server in [vibe.d](https://vibed.org/). You need [a modified version of Mastodon](https://github.com/nametoolong/mastodon) to use this module.
-
-Mastoduck is not very stable (yet). Use at your own risk!
+Mastoduck is a reimplementation of Mastodon's streaming server in [vibe.d](https://vibed.org/). This module is a part of [Nuage](https://github.com/nametoolong/nuage), a soft fork of Mastodon.
 
 ## Installation
 
@@ -15,7 +13,7 @@ First, you need to add the `ddb` submodule as a local dependency. Note this may 
 dub add-local ddb
 ```
 
-Then compile with the appropriate flags.
+Then compile with the appropriate flags. If something does not work, run the debug build to view detailed logs.
 ```bash
 dub build -b debug # build the debug version
 dub -b unittest # run the unit tests
@@ -35,5 +33,3 @@ To run it in an production environment, simply set `RAILS_ENV` to `production`. 
 ```bash
 env RAILS_ENV=development PORT=4000 BIND=0.0.0.0 DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=mastodon DB_PASS=123456 ./mastoduck
 ```
-
-A systemd unit file is provided in the Mastodon fork. However, making the server run smoothly might require more tinkering with the settings.
