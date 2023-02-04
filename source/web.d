@@ -493,6 +493,23 @@ auto buildRequestHandler()
 		res.writeBody("OK", "text/plain");
 	});
 
+	router.get("/metrics", (req, res) {
+		enum responseTemplate =
+			"# TYPE connected_clients gauge\n" ~
+			"# HELP connected_clients The number of clients connected to the streaming server\n" ~
+			"connected_clients %d\n" ~
+			"# TYPE connected_channels gauge\n" ~
+			"# HELP connected_channels The number of Redis channels the streaming server is subscribed to\n" ~
+			"connected_channels %d\n" ~
+			"# EOF\n";
+
+		string response = format(responseTemplate,
+			ConnectionState.getConnectionCount(),
+			SubscriptionManager.getChannelCount());
+
+		res.writeBody(response, "application/openmetrics-text; version=1.0.0; charset=utf-8");
+	});
+
 	debug
 	{
 		router.get("/debug/force_gc", (req, res) {

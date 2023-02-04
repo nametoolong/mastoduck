@@ -169,6 +169,11 @@ struct SubscriptionManager
 		}
 	}
 
+	static long getChannelCount()
+	{
+		return connStateByChannel.length;
+	}
+
 	static void listenRedis() @trusted
 	{
 		RedisConnector.getInstance().listen(toDelegate(&redisCallback));
@@ -269,7 +274,13 @@ class ConnectionState
 		ConnectionState instance = new ConnectionState(authInfo);
 		logDebug("Created a connection state");
 		instance.subscribeToSystemChannel();
+		connectionCount++;
 		return instance;
+	}
+
+	static long getConnectionCount()
+	{
+		return connectionCount;
 	}
 
 	AuthenticationInfo getAuthInfo()
@@ -495,6 +506,7 @@ class ConnectionState
 		}
 
 		closed = true;
+		connectionCount--;
 
 		auto unsubscribeFrom = (string name) nothrow {
 			try
@@ -710,4 +722,6 @@ private:
 	Channel!(StreamMessage, messagePipeCapacity) messagePipe;
 
 	bool closed = false;
+
+	static long connectionCount = 0;
 }
